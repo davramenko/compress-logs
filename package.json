@@ -1,0 +1,20 @@
+{
+  "name": "compress_logs",
+  "version": "1.0.0",
+  "description": "Script to compress the app logs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "compress",
+    "log"
+  ],
+  "author": "Dmytro Avramenko",
+  "license": "ISC",
+  "dependencies": {
+    "deasync": "^0.1.30",
+    "fs-ext": "^2.0.0",
+    "node-getopt": "^0.3.2"
+  }
+}
