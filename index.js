@@ -159,7 +159,7 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
 
             for (const fileInfo of selectedFiles) {
                 const result = spawnSync(
-                    'qq-xz',
+                    'xz',
                     ['-9', `${dir}/${fileInfo.file}`],
                     {
                         stdio: ['ignore', 'ignore', 'pipe'],
@@ -174,8 +174,6 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
                 }
             }
         } while (false);
-
-        process.exit(1);
 
         if (keepFiles > 1) {
             let compressedFiles = [];
