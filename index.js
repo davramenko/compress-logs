@@ -5,7 +5,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const {exec} = require('child_process');
+const {spawn, spawnSync} = require('child_process');
 const Getopt = require('node-getopt');
 const {flock} = require('fs-ext');
 const {createHash} = require('crypto');
@@ -55,6 +55,38 @@ const checkRequiredFields = (obj, requiresFields) => {
     return setsEqual(intersection, new Set(requiresFields));
 };
 
+const onExitProcess = async (eventEmitter) => {
+    return new Promise((resolve, reject) => {
+        eventEmitter.once('exit', (exitCode, signalCode) => {
+            if (exitCode === 0) {
+                resolve({exitCode, signalCode});
+            } else {
+                reject(new Error(
+                    `Non-zero exit: code ${exitCode}, signal ${signalCode}`
+                ));
+            }
+        });
+        eventEmitter.once('error', (err) => {
+            reject(err);
+        });
+    });
+};
+
+const streamToString = async (stream) => {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        stream.on('data', (chunk) => {
+            chunks.push(chunk.toString());
+        });
+        stream.on('end', () => {
+            resolve(chunks.join(''));
+        });
+        stream.on('error', (err) => {
+            reject(err);
+        });
+    });
+}
+
 const opt = getopt.parse(process.argv.slice(2));
 const argv = opt.argv;
 if (argv.length !== 2) {
@@ -75,7 +107,7 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
     }
 
     const fd = fs.openSync(lockFile, 'r');
-    flock(fd, 'exnb', (err) => {
+    flock(fd, 'exnb', async (err) => {
         if (err) {
             if (err.errno === 11) {
                 console.log("WARN: Process is already running");
@@ -126,16 +158,24 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
             );
 
             for (const fileInfo of selectedFiles) {
-                const cmd = `xz -9 '${dir}/${fileInfo.file}'`;
-                exec(cmd, (err, stdout, stderr) => {
-                    if (err) {
-                        console.log(`ERROR: Failed to compress file: "${dir}/${fileInfo.file}"`);
-                        console.log(`stderr: ${stderr}`);
-                        // return; // Don't forget to uncomment this if you would like to add the code outside the IF block
+                const result = spawnSync(
+                    'qq-xz',
+                    ['-9', `${dir}/${fileInfo.file}`],
+                    {
+                        stdio: ['ignore', 'ignore', 'pipe'],
+                        shell: true,
+                        encoding: 'utf-8'
                     }
-                });
+                );
+                if (result.status || result.signal) {
+                    console.log(`ERROR: Failed to compress file: "${dir}/${fileInfo.file}"`);
+                    console.log(`stderr: ${result.stderr}`);
+                    // return; // Don't forget to uncomment this if you would like to add the code outside the IF block
+                }
             }
         } while (false);
+
+        process.exit(1);
 
         if (keepFiles > 1) {
             let compressedFiles = [];

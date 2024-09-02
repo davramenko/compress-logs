@@ -34,3 +34,4 @@ node_modules/
 # Other
 *.bak
 .idea/
+test_*.js
