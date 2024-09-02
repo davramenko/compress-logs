@@ -5,14 +5,16 @@
 
 const path = require('path');
 const fs = require('fs');
-const { exec } = require('child_process');
+const {exec} = require('child_process');
 const Getopt = require('node-getopt');
-const { flock } = require('fs-ext');
-const { createHash } = require('crypto');
+const {flock} = require('fs-ext');
+const {createHash} = require('crypto');
 const deasync = require('deasync');
 
 const getopt = new Getopt([
-  ['h' , 'help'                , 'display this help']
+    ['h', 'help', 'display this help'],
+    ['n', 'keep-files=', 'number of compressed files kept; default: do not remove old files'],
+    ['p', 'compressed-pattern=', 'match the compresed filename; default: \\.xz$']
 ]);
 getopt.setHelp(
     `\nUsage: ${path.basename(process.argv[1])} <dirname> <filename_pattern> [OPTION]\n` +
@@ -24,6 +26,14 @@ getopt.setHelp(
 getopt.on('h', (_) => {
     getopt.showHelp();
     process.exit(1);
+});
+let compressedPattern = '\\.xz$';
+getopt.on('p', (value) => {
+    compressedPattern = value;
+});
+let keepFiles = 0;
+getopt.on('n', (value) => {
+    keepFiles = parseInt(value);
 });
 
 const requiredFields = ['year', 'month', 'day'];
@@ -53,6 +63,7 @@ if (argv.length !== 2) {
 }
 const dir = argv[0];
 const pattern = new RegExp(argv[1], 'i');
+compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, argv[1].length - 1) : argv[1]) + compressedPattern);
 
 (async () => {
     const dirHash = createHash('sha256').update(dir).digest('hex').substring(0, 8);
@@ -60,7 +71,7 @@ const pattern = new RegExp(argv[1], 'i');
     const lockFile = `${lockDir}/process.lock`;
     if (!fs.existsSync(lockDir)) {
         console.log(`Creating directory: "${lockDir}"`);
-        fs.mkdirSync(lockDir, { recursive: true });
+        fs.mkdirSync(lockDir, {recursive: true});
     }
 
     const fd = fs.openSync(lockFile, 'r');
@@ -80,48 +91,71 @@ const pattern = new RegExp(argv[1], 'i');
         }
 
         let selectedFiles = [];
-        fs.readdirSync(dir).forEach(file => {
-            const capture = file.match(pattern);
-            if (capture) {
-                if (!capture.groups || !checkRequiredFields(capture.groups, requiredFields)) {
-                    console.log(`ERROR: Pattern ${pattern} is invalid`);
-                    process.exit(1);
-                }
+        do {
+            fs.readdirSync(dir).forEach(file => {
+                const capture = file.match(pattern);
+                if (capture) {
+                    if (!capture.groups || !checkRequiredFields(capture.groups, requiredFields)) {
+                        console.log(`ERROR: Pattern ${pattern} is invalid`);
+                        process.exit(1);
+                    }
 
-                const fileDate = (new Date(Date.parse(`${capture.groups['year']}-${capture.groups['month']}-${capture.groups['day']}`))).setHours(0,0,0,0)
-                selectedFiles.push({file, fileDate});
-            }
-        });
-        if (selectedFiles.length === 0) {
-            console.log('WARN: No files found to compress');
-            process.exit(0);
-        }
-        if (selectedFiles.length === 1) {
-            process.exit(0);
-        }
-
-        let maxDate = 0;
-        for (const fileInfo of selectedFiles) {
-            if (maxDate < fileInfo.fileDate) {
-                maxDate = fileInfo.fileDate;
-            }
-        }
-
-        selectedFiles = selectedFiles.filter(
-            fileInfo => fileInfo.fileDate !== (new Date()).setHours(0,0,0,0) &&
-                fileInfo.fileDate !== maxDate &&
-                !fs.existsSync(`${dir}/${fileInfo.file}.xz`)
-        );
-
-        for (const fileInfo of selectedFiles) {
-            const cmd = `xz -9 '${dir}/${fileInfo.file}'`;
-            exec(cmd, (err, stdout, stderr) => {
-                if (err) {
-                    console.log(`ERROR: Failed to compress file: "${dir}/${fileInfo.file}"`);
-                    console.log(`stderr: ${stderr}`);
-                    // return; // Don't forget to uncomment this if you would like to add the code outside the IF block
+                    const fileDate = (new Date(Date.parse(`${capture.groups['year']}-${capture.groups['month']}-${capture.groups['day']}`))).setHours(0, 0, 0, 0)
+                    selectedFiles.push({file, fileDate});
                 }
             });
+            if (selectedFiles.length === 0) {
+                console.log('WARN: No files found to compress');
+                break;
+            }
+            if (selectedFiles.length === 1) {
+                break;
+            }
+
+            let maxDate = 0;
+            for (const fileInfo of selectedFiles) {
+                if (maxDate < fileInfo.fileDate) {
+                    maxDate = fileInfo.fileDate;
+                }
+            }
+
+            selectedFiles = selectedFiles.filter(
+                fileInfo => fileInfo.fileDate !== (new Date()).setHours(0, 0, 0, 0) &&
+                    fileInfo.fileDate !== maxDate &&
+                    !fs.existsSync(`${dir}/${fileInfo.file}.xz`)
+            );
+
+            for (const fileInfo of selectedFiles) {
+                const cmd = `xz -9 '${dir}/${fileInfo.file}'`;
+                exec(cmd, (err, stdout, stderr) => {
+                    if (err) {
+                        console.log(`ERROR: Failed to compress file: "${dir}/${fileInfo.file}"`);
+                        console.log(`stderr: ${stderr}`);
+                        // return; // Don't forget to uncomment this if you would like to add the code outside the IF block
+                    }
+                });
+            }
+        } while (false);
+
+        if (keepFiles > 1) {
+            let compressedFiles = [];
+            console.log('Looking for compressed files')
+            fs.readdirSync(dir).forEach(file => {
+                const capture = file.match(compressedPattern);
+                if (capture) {
+                    const fileDate = (new Date(Date.parse(`${capture.groups['year']}-${capture.groups['month']}-${capture.groups['day']}`))).setHours(0, 0, 0, 0)
+                    compressedFiles.push({file, fileDate});
+                }
+            });
+            console.log(`${compressedFiles.length} compressed files found`)
+            if (compressedFiles.length > keepFiles) {
+                compressedFiles.sort((a, b) => a.fileDate < b.fileDate ? -1 : (a.fileDate > b.fileDate ? 1 : 0));
+                while (compressedFiles.length > keepFiles) {
+                    // fs.unlinkSync(`${dir}/${compressedFiles[0].file}`);
+                    console.log(`Remove old file: "${dir}/${compressedFiles[0].file}"`)
+                    compressedFiles = compressedFiles.slice(1)
+                }
+            }
         }
     });
     deasync.sleep(100);
