@@ -5,11 +5,12 @@
 
 const path = require('path');
 const fs = require('fs');
-const {spawn, spawnSync} = require('child_process');
+const {spawnSync} = require('child_process');
 const Getopt = require('node-getopt');
 const {flock} = require('fs-ext');
 const {createHash} = require('crypto');
 const deasync = require('deasync');
+const createLogger = require('./src/logger')
 
 const getopt = new Getopt([
     ['h', 'help', 'display this help'],
@@ -55,38 +56,6 @@ const checkRequiredFields = (obj, requiresFields) => {
     return setsEqual(intersection, new Set(requiresFields));
 };
 
-const onExitProcess = async (eventEmitter) => {
-    return new Promise((resolve, reject) => {
-        eventEmitter.once('exit', (exitCode, signalCode) => {
-            if (exitCode === 0) {
-                resolve({exitCode, signalCode});
-            } else {
-                reject(new Error(
-                    `Non-zero exit: code ${exitCode}, signal ${signalCode}`
-                ));
-            }
-        });
-        eventEmitter.once('error', (err) => {
-            reject(err);
-        });
-    });
-};
-
-const streamToString = async (stream) => {
-    return new Promise((resolve, reject) => {
-        const chunks = [];
-        stream.on('data', (chunk) => {
-            chunks.push(chunk.toString());
-        });
-        stream.on('end', () => {
-            resolve(chunks.join(''));
-        });
-        stream.on('error', (err) => {
-            reject(err);
-        });
-    });
-}
-
 const opt = getopt.parse(process.argv.slice(2));
 const argv = opt.argv;
 if (argv.length !== 2) {
@@ -96,6 +65,21 @@ if (argv.length !== 2) {
 const dir = argv[0];
 const pattern = new RegExp(argv[1], 'i');
 compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, argv[1].length - 1) : argv[1]) + compressedPattern);
+if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) {
+    console.log(`FATAL ERROR: Directory "${dir}" does not exist\n`);
+    process.exit(1);
+}
+const logger = createLogger({
+    level: 'info',
+    dirname: dir,
+    filename: 'compress_logs-%DATE%.log',
+    datePattern: 'YYYY-MM-DD',
+    zippedArchive: 'false',
+    maxsize: 2097152,
+    maxFiles: '7d',
+});
+logger.info('Started...')
+process.exit(1);
 
 (async () => {
     const dirHash = createHash('sha256').update(dir).digest('hex').substring(0, 8);
@@ -104,6 +88,11 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
     if (!fs.existsSync(lockDir)) {
         console.log(`Creating directory: "${lockDir}"`);
         fs.mkdirSync(lockDir, {recursive: true});
+    }
+    if (!fs.existsSync(lockFile)) {
+        console.log(`Creating lock file: "${lockFile}"`);
+        const fd0 = fs.openSync(lockFile, 'w');
+        fs.closeSync(fd0);
     }
 
     const fd = fs.openSync(lockFile, 'r');
@@ -117,11 +106,6 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
         }
 
         // File is locked
-        if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) {
-            console.log(`FATAL ERROR: Directory "${dir}" does not exist\n`);
-            process.exit(1);
-        }
-
         let selectedFiles = [];
         do {
             fs.readdirSync(dir).forEach(file => {
@@ -133,7 +117,7 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
                     }
 
                     const fileDate = (new Date(Date.parse(`${capture.groups['year']}-${capture.groups['month']}-${capture.groups['day']}`))).setHours(0, 0, 0, 0)
-                    selectedFiles.push({file, fileDate});
+                    selectedFiles.push({file, fileDate, skip: true});
                 }
             });
             if (selectedFiles.length === 0) {
@@ -151,10 +135,16 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
                 }
             }
 
-            selectedFiles = selectedFiles.filter(
-                fileInfo => fileInfo.fileDate !== (new Date()).setHours(0, 0, 0, 0) &&
-                    fileInfo.fileDate !== maxDate &&
-                    !fs.existsSync(`${dir}/${fileInfo.file}.xz`)
+            selectedFiles = selectedFiles.map(
+                fileInfo => {
+                    if (fileInfo.fileDate < (new Date()).setHours(0, 0, 0, 0) &&
+                        fileInfo.fileDate !== maxDate &&
+                        !fs.existsSync(`${dir}/${fileInfo.file}.xz`)
+                    ) {
+                        fileInfo.skip = false;
+                    }
+                    return fileInfo;
+                }
             );
 
             for (const fileInfo of selectedFiles) {
@@ -182,15 +172,22 @@ compressedPattern = new RegExp((argv[1].endsWith('$') ? argv[1].substring(0, arg
                 const capture = file.match(compressedPattern);
                 if (capture) {
                     const fileDate = (new Date(Date.parse(`${capture.groups['year']}-${capture.groups['month']}-${capture.groups['day']}`))).setHours(0, 0, 0, 0)
-                    compressedFiles.push({file, fileDate});
+                    const foundInfo = selectedFiles.find(fileInfo => fileInfo.fileDate === fileDate);
+                    if (!foundInfo || !foundInfo.skip) {
+                        compressedFiles.push({file, fileDate});
+                    }
                 }
             });
             console.log(`${compressedFiles.length} compressed files found`)
             if (compressedFiles.length > keepFiles) {
                 compressedFiles.sort((a, b) => a.fileDate < b.fileDate ? -1 : (a.fileDate > b.fileDate ? 1 : 0));
                 while (compressedFiles.length > keepFiles) {
-                    // fs.unlinkSync(`${dir}/${compressedFiles[0].file}`);
-                    console.log(`Remove old file: "${dir}/${compressedFiles[0].file}"`)
+                    try {
+                        fs.unlinkSync(`${dir}/${compressedFiles[0].file}`);
+                        console.log(`Remove old file: "${dir}/${compressedFiles[0].file}"`)
+                    } catch (err) {
+                        console.log('ERROR: Cannot delete old file: ' + err.message);
+                    }
                     compressedFiles = compressedFiles.slice(1)
                 }
             }
